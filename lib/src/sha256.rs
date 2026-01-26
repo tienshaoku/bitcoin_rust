@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha256::digest;
 use std::fmt;
 
-#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq, Hash)]
 pub struct Hash(U256);
 
 impl fmt::Display for Hash {
@@ -32,6 +32,11 @@ impl Hash {
 
     pub fn matches_target(&self, target: U256) -> bool {
         self.0 <= target
+    }
+
+    pub fn as_bytes(&self) -> [u8; 32] {
+        let bytes = self.0.to_little_endian();
+        bytes.as_slice().try_into().unwrap()
     }
 
     pub fn zero() -> Self {

@@ -5,13 +5,14 @@ use crate::sha256::Hash;
 use crate::util::MerkleRoot;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Blockchain {
     pub utxos: HashMap<Hash, TransactionOutput>,
     pub blocks: Vec<Block>,
+    pub target: U256,
 }
 
 impl Blockchain {
@@ -19,6 +20,7 @@ impl Blockchain {
         Blockchain {
             utxos: HashMap::new(),
             blocks: vec![],
+            target: crate::MIN_TARGET,
         }
     }
 
@@ -32,6 +34,37 @@ impl Blockchain {
                     self.utxos.insert(transaction.hash(), output.clone());
                 }
             }
+        }
+    }
+
+    pub fn try_adjust_target(&mut self) {
+        if self.blocks.is_empty() {
+            return;
+        }
+        if self.blocks.len() % crate::DIFFICULTY_UPDATE_INTERVAL as usize != 0 {
+            return;
+        }
+        // measure the time it took to mine the last crate::DIFFICULTY_UPDATE_INTERVAL blocks
+        let start_time = self.blocks
+            [self.blocks.len() - crate::DIFFICULTY_UPDATE_INTERVAL as usize]
+            .header
+            .timestamp;
+        let end_time = self.blocks.last().unwrap().header.timestamp;
+        let time_diff = end_time - start_time;
+        let time_diff_seconds = time_diff.num_seconds();
+        let target_seconds = crate::IDEAL_BLOCK_TIME * crate::DIFFICULTY_UPDATE_INTERVAL;
+        let new_target = self.target * (time_diff_seconds as f64 / target_seconds as f64) as usize;
+        let new_target = if new_target < self.target / 4 {
+            self.target / 4
+        } else if new_target > self.target * 4 {
+            self.target * 4
+        } else {
+            new_target
+        };
+        self.target = new_target.min(crate::MIN_TARGET);
+
+        if self.blocks.len() % crate::DIFFICULTY_UPDATE_INTERVAL as usize != 0 {
+            return;
         }
     }
 
@@ -63,7 +96,12 @@ impl Blockchain {
 
             block.verify_transactions(self.block_height(), &self.utxos)?;
         }
+        let block_transactions: HashSet<_> =
+            block.transactions.iter().map(|tx| tx.hash()).collect();
+        self.mempool
+            .retain(|(_, tx)| !block_transactions.contains(&tx.hash()));
         self.blocks.push(block);
+        self.try_adjust_target();
         Ok(())
     }
 
@@ -91,7 +129,30 @@ impl Block {
     }
 
     pub fn calculate_miner_fees(&self, utxos: &HashMap<Hash, TransactionOutput>) -> Result<u64> {
-        todo!()
+        let mut inputs: HashMap<Hash, TransactionOutput> = HashMap::new();
+        let mut outputs: HashMap<Hash, TransactionOutput> = HashMap::new();
+        for transaction in self.transactions.iter().skip(1) {
+            for input in &transaction.inputs {
+                let prev_output = utxos.get(&input.prev_transaction_output_hash);
+                if prev_output.is_none() {
+                    return Err(BtcError::InvalidTransaction);
+                }
+                let prev_output = prev_output.unwrap();
+                if inputs.contains_key(&input.prev_transaction_output_hash) {
+                    return Err(BtcError::InvalidTransaction);
+                }
+                inputs.insert(input.prev_transaction_output_hash, prev_output.clone());
+            }
+            for output in &transaction.outputs {
+                if outputs.contains_key(&output.hash()) {
+                    return Err(BtcError::InvalidTransaction);
+                }
+                outputs.insert(output.hash(), output.clone());
+            }
+        }
+        let input_value: u64 = inputs.values().map(|output| output.value).sum();
+        let output_value: u64 = outputs.values().map(|output| output.value).sum();
+        Ok(input_value - output_value)
     }
 
     pub fn verify_coinbase_transaction(
